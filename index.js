@@ -1,11 +1,21 @@
 /**
  * Facebook Messenger Bot
- * A simple bot using fca-unofficial library with event-driven architecture
+ * A modular bot using fca-unofficial library with event-driven architecture
  * @module fb-bot
  */
 
 import fs from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath, pathToFileURL } from "url";
 import login from "./lib/fca-unofficial/index.js";
+
+// ============================================================================
+// ES MODULE HELPERS
+// ============================================================================
+
+/** Current file's directory path (ESM equivalent of __dirname) */
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // ============================================================================
 // CONFIGURATION
@@ -20,6 +30,8 @@ const CONFIG = {
   prefix: "/",
   /** Path to the appstate file */
   appStatePath: "appstate.json",
+  /** Path to the commands directory */
+  commandsPath: join(__dirname, "modules", "commands"),
   /** MQTT listener options */
   listenOptions: {
     listenEvents: true,
@@ -81,16 +93,6 @@ const Logger = {
    * @param {string} message - Message to log
    */
   event: (emoji, message) => console.log(`${emoji} ${message}`),
-
-  /**
-   * Log incoming message with thread and sender info
-   * @param {string} threadID - The thread/conversation ID
-   * @param {string} senderID - The sender's user ID
-   * @param {string} body - The message body content
-   */
-  message: (threadID, senderID, body) => {
-    console.log(`💬 ${threadID} | ${senderID}: ${body}`);
-  },
 };
 
 // ============================================================================
@@ -159,103 +161,132 @@ function initializeAppState() {
 }
 
 // ============================================================================
-// COMMAND REGISTRY
+// COMMAND LOADER
 // ============================================================================
 
 /**
- * @typedef {Object} CommandContext
- * @property {Object} api - The Facebook API object
- * @property {Object} msg - The message object
- * @property {string[]} args - Command arguments
- * @property {string} raw - Raw command string without prefix
+ * Dynamically load all command modules from the commands directory
+ * @param {string} commandsPath - Path to the commands directory
+ * @returns {Promise<Map<string, Object>>} Map of command name to module
  */
+async function loadCommands(commandsPath) {
+  const commands = new Map();
 
-/**
- * @typedef {Function} CommandHandler
- * @param {CommandContext} context - The command context
- * @returns {Promise<void>}
- */
-
-/**
- * Command registry - Map of command names to their handlers
- * @type {Map<string, { handler: CommandHandler, description: string }>}
- */
-const commands = new Map();
-
-/**
- * Register a new command
- * @param {string} name - Command name (without prefix)
- * @param {string} description - Command description
- * @param {CommandHandler} handler - Command handler function
- */
-function registerCommand(name, description, handler) {
-  commands.set(name.toLowerCase(), { handler, description });
-}
-
-/**
- * Execute a command if it exists, or notify user if command not found
- * @param {Object} api - The Facebook API object
- * @param {Object} msg - The message object
- * @returns {Promise<boolean>} True if command was executed successfully
- */
-async function executeCommand(api, msg) {
-  if (!msg.body) return false;
-
-  const parsed = parseCommand(msg.body);
-  if (!parsed) return false;
-
-  const commandEntry = commands.get(parsed.command);
-  
-  // Command not found - notify user
-  if (!commandEntry) {
-    api.sendMessage(
-      `❓ Command not found: "${CONFIG.prefix}${parsed.command}"\n\nType ${CONFIG.prefix}help to see available commands.`,
-      msg.threadID
-    );
-    return false;
+  // Ensure commands directory exists
+  if (!fs.existsSync(commandsPath)) {
+    Logger.warn(`Commands directory not found: ${commandsPath}`);
+    fs.mkdirSync(commandsPath, { recursive: true });
+    Logger.info(`Created commands directory: ${commandsPath}`);
+    return commands;
   }
 
   try {
-    await commandEntry.handler({
-      api,
-      msg,
+    const files = await fs.promises.readdir(commandsPath);
+    const jsFiles = files.filter((file) => file.endsWith(".js"));
+
+    for (const file of jsFiles) {
+      try {
+        const filePath = join(commandsPath, file);
+        const fileUrl = pathToFileURL(filePath).href;
+        const module = await import(fileUrl);
+
+        // Validate module has required config
+        if (!module.config || !module.config.name) {
+          Logger.warn(`Skipping ${file}: missing config.name`);
+          continue;
+        }
+
+        // Validate module has at least one handler
+        if (typeof module.onStart !== "function" && typeof module.onChat !== "function") {
+          Logger.warn(`Skipping ${file}: missing onStart or onChat handler`);
+          continue;
+        }
+
+        const commandName = module.config.name.toLowerCase();
+        commands.set(commandName, module);
+        Logger.info(`Loaded command: ${commandName}`);
+      } catch (loadError) {
+        Logger.error(`Failed to load command file: ${file}`, loadError);
+      }
+    }
+
+    Logger.success(`Loaded ${commands.size} command(s)`);
+  } catch (error) {
+    Logger.error("Failed to read commands directory", error);
+  }
+
+  return commands;
+}
+
+// ============================================================================
+// MESSAGE HANDLER
+// ============================================================================
+
+/**
+ * Handle incoming message events
+ * Executes onChat for all commands, then onStart for prefix commands
+ * @param {Object} api - The Facebook API object
+ * @param {Object} event - The message event object
+ * @param {Map<string, Object>} commands - Map of loaded commands
+ * @returns {Promise<void>}
+ */
+async function handleMessage(api, event, commands) {
+  // Build context object for handlers
+  const baseContext = {
+    api,
+    event,
+    commands,
+    prefix: CONFIG.prefix,
+  };
+
+  // Execute onChat for all commands (no prefix required)
+  for (const [name, module] of commands) {
+    if (typeof module.onChat === "function") {
+      try {
+        await module.onChat(baseContext);
+      } catch (error) {
+        Logger.error(`onChat error in "${name}"`, error);
+      }
+    }
+  }
+
+  // Check for prefix command
+  if (!event.body) return;
+
+  const parsed = parseCommand(event.body);
+  if (!parsed) return;
+
+  const commandModule = commands.get(parsed.command);
+
+  // Command not found - notify user
+  if (!commandModule) {
+    api.sendMessage(
+      `❓ Command not found: "${CONFIG.prefix}${parsed.command}"\n\nType ${CONFIG.prefix}help to see available commands.`,
+      event.threadID
+    );
+    return;
+  }
+
+  // Command found but has no onStart handler
+  if (typeof commandModule.onStart !== "function") {
+    return;
+  }
+
+  // Execute the command
+  try {
+    await commandModule.onStart({
+      ...baseContext,
       args: parsed.args,
       raw: parsed.raw,
     });
-    return true;
   } catch (error) {
     Logger.error(`Command "${parsed.command}" failed`, error);
     api.sendMessage(
       "An error occurred while processing your command.",
-      msg.threadID
+      event.threadID
     );
-    return false;
   }
 }
-
-// ============================================================================
-// COMMAND DEFINITIONS
-// ============================================================================
-
-// Register: /hi
-registerCommand("hi", "Greets the user", async ({ api, msg }) => {
-  api.sendMessage("Hello! 👋", msg.threadID);
-});
-
-// Register: /help
-registerCommand("help", "Shows available commands", async ({ api, msg }) => {
-  const commandList = Array.from(commands.entries())
-    .map(([name, { description }]) => `${CONFIG.prefix}${name} - ${description}`)
-    .join("\n");
-
-  api.sendMessage(`📚 Available Commands:\n\n${commandList}`, msg.threadID);
-});
-
-// Register: /ping
-registerCommand("ping", "Check if bot is alive", async ({ api, msg }) => {
-  const start = Date.now();
-  api.sendMessage(`🏓 Pong! Latency: ${Date.now() - start}ms`, msg.threadID);
-});
 
 // ============================================================================
 // EVENT HANDLERS
@@ -265,8 +296,9 @@ registerCommand("ping", "Check if bot is alive", async ({ api, msg }) => {
  * Set up all event listeners for the MQTT listener
  * @param {Object} listener - The MQTT listener object
  * @param {Object} api - The Facebook API object
+ * @param {Map<string, Object>} commands - Map of loaded commands
  */
-function setupEventListeners(listener, api) {
+function setupEventListeners(listener, api, commands) {
   // Lifecycle events
   listener.on("connected", () => {
     Logger.success("MQTT Connected!");
@@ -295,16 +327,12 @@ function setupEventListeners(listener, api) {
   });
 
   // Message events
-  listener.on("message", (msg) => {
-    // Log all incoming messages (no prefix required)
-    Logger.message(msg.threadID, msg.senderID, msg.body || "[Attachment/Media]");
-    executeCommand(api, msg);
+  listener.on("message", async (event) => {
+    await handleMessage(api, event, commands);
   });
 
-  listener.on("message_reply", (msg) => {
-    // Log all reply messages (no prefix required)
-    Logger.message(msg.threadID, msg.senderID, msg.body || "[Attachment/Media]");
-    executeCommand(api, msg);
+  listener.on("message_reply", async (event) => {
+    await handleMessage(api, event, commands);
   });
 
   listener.on("message_reaction", (data) => {
@@ -414,6 +442,9 @@ async function startBot() {
 
   Logger.info("Bot starting...");
 
+  // Load commands
+  const commands = await loadCommands(CONFIG.commandsPath);
+
   // Wrap login in a Promise for async/await
   return new Promise((resolve, reject) => {
     login({ appState }, (err, api) => {
@@ -431,10 +462,10 @@ async function startBot() {
       activeListener = listener;
 
       // Set up all event handlers
-      setupEventListeners(listener, api);
+      setupEventListeners(listener, api, commands);
 
       Logger.success("Bot initialized successfully!");
-      resolve({ api, listener });
+      resolve({ api, listener, commands });
     });
   });
 }
