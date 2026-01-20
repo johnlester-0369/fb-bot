@@ -183,10 +183,10 @@ function registerCommand(name, description, handler) {
 }
 
 /**
- * Execute a command if it exists
+ * Execute a command if it exists, or notify user if command not found
  * @param {Object} api - The Facebook API object
  * @param {Object} msg - The message object
- * @returns {Promise<boolean>} True if command was executed
+ * @returns {Promise<boolean>} True if command was executed successfully
  */
 async function executeCommand(api, msg) {
   if (!msg.body) return false;
@@ -195,7 +195,15 @@ async function executeCommand(api, msg) {
   if (!parsed) return false;
 
   const commandEntry = commands.get(parsed.command);
-  if (!commandEntry) return false;
+  
+  // Command not found - notify user
+  if (!commandEntry) {
+    api.sendMessage(
+      `❓ Command not found: "${CONFIG.prefix}${parsed.command}"\n\nType ${CONFIG.prefix}help to see available commands.`,
+      msg.threadID
+    );
+    return false;
+  }
 
   try {
     await commandEntry.handler({
