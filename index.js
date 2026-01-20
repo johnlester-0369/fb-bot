@@ -33,11 +33,21 @@ function isCommand(message, command) {
 if (!fs.existsSync("appstate.json")) {
   console.log("Creating appstate.json...");
   fs.writeFileSync("appstate.json", "[]");
-  console.log("Put your Facebook session cookies in appstate.json and run the bot.");
+  console.log(
+    "Put your Facebook session cookies in appstate.json and run the bot.",
+  );
   process.exit(0);
 }
 
 console.log("Bot starting...");
+
+async function commands(api, msg) {
+  if (!msg.body || !isPrefix(msg.body)) return; // ignore non-prefix
+
+  if (isCommand(msg.body, "hi")) {
+    api.sendMessage("Hello!", msg.threadID);
+  }
+}
 
 login(
   { appState: JSON.parse(fs.readFileSync("appstate.json", "utf8")) },
@@ -58,7 +68,9 @@ login(
     });
 
     listener.on("disconnected", (reason, willReconnect) => {
-      console.log(`⚠️ Disconnected: ${reason}, will reconnect: ${willReconnect}`);
+      console.log(
+        `⚠️ Disconnected: ${reason}, will reconnect: ${willReconnect}`,
+      );
     });
 
     listener.on("reconnecting", (attempt) => {
@@ -82,15 +94,11 @@ login(
 
     // Message events
     listener.on("message", (msg) => {
-      if (!msg.body || !isPrefix(msg.body)) return; // ignore non-prefix
-
-      if (isCommand(msg.body, "hi")) {
-        api.sendMessage("Hello!", msg.threadID);
-      }
+      commands(api, msg);
     });
 
     listener.on("message_reply", (msg) => {
-      console.log(`📩 Reply from ${msg.senderID}: ${msg.body}`);
+      commands(api, msg);
     });
 
     listener.on("message_reaction", (data) => {
@@ -129,5 +137,5 @@ login(
     listener.on("friend_request_cancel", (data) => {
       console.log(`❌ Friend request canceled by ${data.actorFbId}`);
     });
-  }
+  },
 );
