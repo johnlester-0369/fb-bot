@@ -111,22 +111,54 @@ function hasPrefix(message) {
 }
 
 /**
- * Parse command and arguments from a message
- * @param {string} message - The message body to parse
- * @returns {{ command: string, args: string[], raw: string } | null} Parsed command object or null
+ * Parse command and arguments from event.args
+ * Handles edge cases:
+ * - "/cmd text text" → command: "cmd", args: ["text", "text"]
+ * - "/ cmd text text" → command: "cmd", args: ["text", "text"]
+ * - "/" → returns null (prefix only, no command)
+ * 
+ * @param {string[]} eventArgs - The event.args array from fca-unofficial
+ * @param {string} prefix - The command prefix
+ * @returns {{ command: string, args: string[] } | null} Parsed command object or null
  */
-function parseCommand(message) {
-  if (!hasPrefix(message)) return null;
+function parseCommandFromArgs(eventArgs, prefix) {
+  // No args or empty args
+  if (!eventArgs || !Array.isArray(eventArgs) || eventArgs.length === 0) {
+    return null;
+  }
 
-  const withoutPrefix = message.slice(CONFIG.prefix.length).trim();
-  const parts = withoutPrefix.split(/\s+/);
-  const command = parts[0].toLowerCase();
-  const args = parts.slice(1);
+  // Clone args to avoid mutating original event.args
+  const args = [...eventArgs];
+  let commandName;
+
+  // Case 1: First element is exactly the prefix (e.g., "/" from "/ cmd text")
+  if (args[0] === prefix) {
+    // Just prefix alone - e.g., "/" with nothing after
+    if (args.length === 1) {
+      return null; // Will trigger "Command not found"
+    }
+    // Prefix separated from command - e.g., ["/" , "cmd", "text"]
+    args.shift(); // Remove the standalone prefix
+    commandName = args.shift().toLowerCase(); // Get and remove command name
+  }
+  // Case 2: First element starts with prefix (e.g., "/cmd" from "/cmd text")
+  else if (args[0].startsWith(prefix)) {
+    const firstArg = args.shift();
+    commandName = firstArg.slice(prefix.length).toLowerCase();
+    
+    // Handle edge case: prefix with no command name attached (shouldn't happen with proper parsing)
+    if (!commandName) {
+      return null;
+    }
+  }
+  // Case 3: Doesn't start with prefix
+  else {
+    return null;
+  }
 
   return {
-    command,
-    args,
-    raw: withoutPrefix,
+    command: commandName,
+    args: args, // Remaining args after removing prefix and command
   };
 }
 
@@ -297,6 +329,7 @@ async function loadEvents(eventsPath) {
 /**
  * Handle incoming message events
  * Executes onChat for all commands, then onStart for prefix commands
+ * Uses event.args from fca-unofficial for argument parsing
  * @param {Object} api - The Facebook API object
  * @param {Object} event - The message event object
  * @param {Map<string, Object>} commands - Map of loaded commands
@@ -322,11 +355,22 @@ async function handleMessage(api, event, commands) {
     }
   }
 
-  // Check for prefix command
-  if (!event.body) return;
+  // Check if message has body and starts with prefix
+  if (!event.body || !hasPrefix(event.body)) {
+    return;
+  }
 
-  const parsed = parseCommand(event.body);
-  if (!parsed) return;
+  // Use event.args from fca-unofficial (already normalized, no empty strings)
+  const parsed = parseCommandFromArgs(event.args, CONFIG.prefix);
+
+  // Prefix only (e.g., "/" with no command) or invalid input
+  if (!parsed) {
+    api.sendMessage(
+      `❓ Command not found: "${CONFIG.prefix}"\n\nType ${CONFIG.prefix}help to see available commands.`,
+      event.threadID
+    );
+    return;
+  }
 
   const commandModule = commands.get(parsed.command);
 
@@ -344,12 +388,11 @@ async function handleMessage(api, event, commands) {
     return;
   }
 
-  // Execute the command
+  // Execute the command with processed args (without prefix and command name)
   try {
     await commandModule.onStart({
       ...baseContext,
-      args: parsed.args,
-      raw: parsed.raw,
+      args: parsed.args, // Already processed: ["text", "text"] without "/cmd"
     });
   } catch (error) {
     Logger.error(`Command "${parsed.command}" failed`, error);
