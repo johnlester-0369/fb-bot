@@ -81,6 +81,16 @@ const Logger = {
    * @param {string} message - Message to log
    */
   event: (emoji, message) => console.log(`${emoji} ${message}`),
+
+  /**
+   * Log incoming message with thread and sender info
+   * @param {string} threadID - The thread/conversation ID
+   * @param {string} senderID - The sender's user ID
+   * @param {string} body - The message body content
+   */
+  message: (threadID, senderID, body) => {
+    console.log(`💬 ${threadID} | ${senderID}: ${body}`);
+  },
 };
 
 // ============================================================================
@@ -286,10 +296,14 @@ function setupEventListeners(listener, api) {
 
   // Message events
   listener.on("message", (msg) => {
+    // Log all incoming messages (no prefix required)
+    Logger.message(msg.threadID, msg.senderID, msg.body || "[Attachment/Media]");
     executeCommand(api, msg);
   });
 
   listener.on("message_reply", (msg) => {
+    // Log all reply messages (no prefix required)
+    Logger.message(msg.threadID, msg.senderID, msg.body || "[Attachment/Media]");
     executeCommand(api, msg);
   });
 
