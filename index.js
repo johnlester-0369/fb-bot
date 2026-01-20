@@ -1,141 +1,424 @@
+/**
+ * Facebook Messenger Bot
+ * A simple bot using fca-unofficial library with event-driven architecture
+ * @module fb-bot
+ */
+
 import fs from "fs";
 import login from "./lib/fca-unofficial/index.js";
 
-const PREFIX = "/";
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
 
-const listenOptions = {
-  listenEvents: true, // Receive events (join/leave, rename, etc.)
-  selfListen: false, // Receive messages from yourself
-  logLevel: "silent", // Disable logs (silent/error/warn/info/verbose)
+/**
+ * Bot configuration object
+ * @constant {Object}
+ */
+const CONFIG = {
+  /** Command prefix for bot commands */
+  prefix: "/",
+  /** Path to the appstate file */
+  appStatePath: "appstate.json",
+  /** MQTT listener options */
+  listenOptions: {
+    listenEvents: true,
+    selfListen: false,
+    logLevel: "silent",
+  },
 };
 
-/**
- * Check if message starts with prefix
- * @param {string} message - Message body
- * @returns {boolean}
- */
-function isPrefix(message) {
-  return message.startsWith(PREFIX);
-}
+// ============================================================================
+// LOGGING UTILITIES
+// ============================================================================
 
 /**
- * Check if message is a specific command
- * @param {string} message - Message body
- * @param {string} command - Command name
- * @returns {boolean}
+ * Simple logger with emoji prefixes for better visibility
+ * @constant {Object}
  */
-function isCommand(message, command) {
-  return (
-    message === PREFIX + command || message.startsWith(PREFIX + command + " ")
-  );
+const Logger = {
+  /**
+   * Log informational message
+   * @param {string} message - Message to log
+   */
+  info: (message) => console.log(`ℹ️  ${message}`),
+
+  /**
+   * Log success message
+   * @param {string} message - Message to log
+   */
+  success: (message) => console.log(`✅ ${message}`),
+
+  /**
+   * Log warning message
+   * @param {string} message - Message to log
+   */
+  warn: (message) => console.warn(`⚠️  ${message}`),
+
+  /**
+   * Log error message
+   * @param {string} message - Message to log
+   * @param {Error} [error] - Optional error object
+   */
+  error: (message, error) => {
+    console.error(`❌ ${message}`);
+    if (error) console.error(error);
+  },
+
+  /**
+   * Log fatal error message
+   * @param {string} message - Message to log
+   * @param {Error} [error] - Optional error object
+   */
+  fatal: (message, error) => {
+    console.error(`💀 ${message}`);
+    if (error) console.error(error);
+  },
+
+  /**
+   * Log event message
+   * @param {string} emoji - Emoji prefix
+   * @param {string} message - Message to log
+   */
+  event: (emoji, message) => console.log(`${emoji} ${message}`),
+};
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+/**
+ * Check if a message starts with the configured prefix
+ * @param {string} message - The message body to check
+ * @returns {boolean} True if message starts with prefix
+ */
+function hasPrefix(message) {
+  return typeof message === "string" && message.startsWith(CONFIG.prefix);
 }
 
-if (!fs.existsSync("appstate.json")) {
-  console.log("Creating appstate.json...");
-  fs.writeFileSync("appstate.json", "[]");
-  console.log(
-    "Put your Facebook session cookies in appstate.json and run the bot.",
-  );
-  process.exit(0);
+/**
+ * Parse command and arguments from a message
+ * @param {string} message - The message body to parse
+ * @returns {{ command: string, args: string[], raw: string } | null} Parsed command object or null
+ */
+function parseCommand(message) {
+  if (!hasPrefix(message)) return null;
+
+  const withoutPrefix = message.slice(CONFIG.prefix.length).trim();
+  const parts = withoutPrefix.split(/\s+/);
+  const command = parts[0].toLowerCase();
+  const args = parts.slice(1);
+
+  return {
+    command,
+    args,
+    raw: withoutPrefix,
+  };
 }
 
-console.log("Bot starting...");
-
-async function commands(api, msg) {
-  if (!msg.body || !isPrefix(msg.body)) return; // ignore non-prefix
-
-  if (isCommand(msg.body, "hi")) {
-    api.sendMessage("Hello!", msg.threadID);
+/**
+ * Load appstate from file
+ * @returns {Array|null} Parsed appstate or null if not found/invalid
+ */
+function loadAppState() {
+  try {
+    if (!fs.existsSync(CONFIG.appStatePath)) {
+      return null;
+    }
+    const data = fs.readFileSync(CONFIG.appStatePath, "utf8");
+    return JSON.parse(data);
+  } catch (error) {
+    Logger.error("Failed to load appstate", error);
+    return null;
   }
 }
 
-login(
-  { appState: JSON.parse(fs.readFileSync("appstate.json", "utf8")) },
-  (err, api) => {
-    if (err) {
-      console.error("Login Error:", err);
-      return;
+/**
+ * Initialize appstate file if it doesn't exist
+ * @returns {boolean} True if initialization was needed and performed
+ */
+function initializeAppState() {
+  if (fs.existsSync(CONFIG.appStatePath)) {
+    return false;
+  }
+
+  Logger.info("Creating appstate.json...");
+  fs.writeFileSync(CONFIG.appStatePath, "[]");
+  Logger.info("Put your Facebook session cookies in appstate.json and run the bot.");
+  return true;
+}
+
+// ============================================================================
+// COMMAND REGISTRY
+// ============================================================================
+
+/**
+ * @typedef {Object} CommandContext
+ * @property {Object} api - The Facebook API object
+ * @property {Object} msg - The message object
+ * @property {string[]} args - Command arguments
+ * @property {string} raw - Raw command string without prefix
+ */
+
+/**
+ * @typedef {Function} CommandHandler
+ * @param {CommandContext} context - The command context
+ * @returns {Promise<void>}
+ */
+
+/**
+ * Command registry - Map of command names to their handlers
+ * @type {Map<string, { handler: CommandHandler, description: string }>}
+ */
+const commands = new Map();
+
+/**
+ * Register a new command
+ * @param {string} name - Command name (without prefix)
+ * @param {string} description - Command description
+ * @param {CommandHandler} handler - Command handler function
+ */
+function registerCommand(name, description, handler) {
+  commands.set(name.toLowerCase(), { handler, description });
+}
+
+/**
+ * Execute a command if it exists
+ * @param {Object} api - The Facebook API object
+ * @param {Object} msg - The message object
+ * @returns {Promise<boolean>} True if command was executed
+ */
+async function executeCommand(api, msg) {
+  if (!msg.body) return false;
+
+  const parsed = parseCommand(msg.body);
+  if (!parsed) return false;
+
+  const commandEntry = commands.get(parsed.command);
+  if (!commandEntry) return false;
+
+  try {
+    await commandEntry.handler({
+      api,
+      msg,
+      args: parsed.args,
+      raw: parsed.raw,
+    });
+    return true;
+  } catch (error) {
+    Logger.error(`Command "${parsed.command}" failed`, error);
+    api.sendMessage(
+      "An error occurred while processing your command.",
+      msg.threadID
+    );
+    return false;
+  }
+}
+
+// ============================================================================
+// COMMAND DEFINITIONS
+// ============================================================================
+
+// Register: /hi
+registerCommand("hi", "Greets the user", async ({ api, msg }) => {
+  api.sendMessage("Hello! 👋", msg.threadID);
+});
+
+// Register: /help
+registerCommand("help", "Shows available commands", async ({ api, msg }) => {
+  const commandList = Array.from(commands.entries())
+    .map(([name, { description }]) => `${CONFIG.prefix}${name} - ${description}`)
+    .join("\n");
+
+  api.sendMessage(`📚 Available Commands:\n\n${commandList}`, msg.threadID);
+});
+
+// Register: /ping
+registerCommand("ping", "Check if bot is alive", async ({ api, msg }) => {
+  const start = Date.now();
+  api.sendMessage(`🏓 Pong! Latency: ${Date.now() - start}ms`, msg.threadID);
+});
+
+// ============================================================================
+// EVENT HANDLERS
+// ============================================================================
+
+/**
+ * Set up all event listeners for the MQTT listener
+ * @param {Object} listener - The MQTT listener object
+ * @param {Object} api - The Facebook API object
+ */
+function setupEventListeners(listener, api) {
+  // Lifecycle events
+  listener.on("connected", () => {
+    Logger.success("MQTT Connected!");
+  });
+
+  listener.on("disconnected", (reason, willReconnect) => {
+    Logger.warn(`Disconnected: ${reason}, will reconnect: ${willReconnect}`);
+  });
+
+  listener.on("reconnecting", (attempt) => {
+    Logger.event("🔄", `Reconnecting... attempt ${attempt}`);
+  });
+
+  listener.on("closed", () => {
+    Logger.event("🛑", "Listener closed");
+  });
+
+  // Error events
+  listener.on("error", (err) => {
+    Logger.error("Non-fatal error", err);
+  });
+
+  listener.on("fatal", (err) => {
+    Logger.fatal("Fatal error - Bot needs to restart", err);
+    gracefulShutdown(1);
+  });
+
+  // Message events
+  listener.on("message", (msg) => {
+    executeCommand(api, msg);
+  });
+
+  listener.on("message_reply", (msg) => {
+    executeCommand(api, msg);
+  });
+
+  listener.on("message_reaction", (data) => {
+    Logger.event("👍", `Reaction: ${data.reaction} on message ${data.messageID}`);
+  });
+
+  listener.on("message_unsend", (data) => {
+    Logger.event("🗑️", `Message unsent: ${data.messageID}`);
+  });
+
+  // Typing and presence
+  listener.on("typing", (data) => {
+    if (data.isTyping) {
+      Logger.event("⌨️", `${data.from} is typing in ${data.threadID}`);
     }
+  });
 
-    api.setOptions(listenOptions);
+  listener.on("presence", (data) => {
+    Logger.event("👤", `Presence update for ${data.userID}`);
+  });
 
-    // Use the new EventEmitter pattern
-    const listener = api.listenMqtt();
+  listener.on("read_receipt", (data) => {
+    Logger.event("👀", `${data.reader} read messages in ${data.threadID}`);
+  });
 
-    // Lifecycle events
-    listener.on("connected", () => {
-      console.log("✅ MQTT Connected!");
-    });
+  // Thread events
+  listener.on("event", (data) => {
+    Logger.event("📢", `Event: ${data.logMessageType}`);
+  });
 
-    listener.on("disconnected", (reason, willReconnect) => {
-      console.log(
-        `⚠️ Disconnected: ${reason}, will reconnect: ${willReconnect}`,
-      );
-    });
+  // Friend requests
+  listener.on("friend_request_received", (data) => {
+    Logger.event("👋", `Friend request from ${data.actorFbId}`);
+  });
 
-    listener.on("reconnecting", (attempt) => {
-      console.log(`🔄 Reconnecting... attempt ${attempt}`);
-    });
+  listener.on("friend_request_cancel", (data) => {
+    Logger.event("❌", `Friend request canceled by ${data.actorFbId}`);
+  });
+}
 
-    listener.on("closed", () => {
-      console.log("🛑 Listener closed");
-    });
+// ============================================================================
+// SHUTDOWN HANDLING
+// ============================================================================
 
-    // Error events
-    listener.on("error", (err) => {
-      console.error("❌ Non-fatal error:", err);
-    });
+/** @type {Object|null} Reference to active listener for cleanup */
+let activeListener = null;
 
-    listener.on("fatal", (err) => {
-      console.error("💀 Fatal error:", err);
-      console.error("Bot needs to restart...");
-      process.exit(1);
-    });
+/**
+ * Perform graceful shutdown
+ * @param {number} [exitCode=0] - Exit code
+ */
+function gracefulShutdown(exitCode = 0) {
+  Logger.info("Shutting down gracefully...");
 
-    // Message events
-    listener.on("message", (msg) => {
-      commands(api, msg);
-    });
+  if (activeListener) {
+    try {
+      activeListener.removeAllListeners();
+    } catch (e) {
+      // Ignore cleanup errors
+    }
+  }
 
-    listener.on("message_reply", (msg) => {
-      commands(api, msg);
-    });
+  process.exit(exitCode);
+}
 
-    listener.on("message_reaction", (data) => {
-      console.log(`👍 Reaction: ${data.reaction} on message ${data.messageID}`);
-    });
+// Handle process signals
+process.on("SIGINT", () => {
+  Logger.info("Received SIGINT");
+  gracefulShutdown(0);
+});
 
-    listener.on("message_unsend", (data) => {
-      console.log(`🗑️ Message unsent: ${data.messageID}`);
-    });
+process.on("SIGTERM", () => {
+  Logger.info("Received SIGTERM");
+  gracefulShutdown(0);
+});
 
-    // Typing and presence
-    listener.on("typing", (data) => {
-      if (data.isTyping) {
-        console.log(`⌨️ ${data.from} is typing in ${data.threadID}`);
+process.on("uncaughtException", (error) => {
+  Logger.fatal("Uncaught exception", error);
+  gracefulShutdown(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  Logger.error("Unhandled rejection at:", promise);
+  Logger.error("Reason:", reason);
+});
+
+// ============================================================================
+// MAIN ENTRY POINT
+// ============================================================================
+
+/**
+ * Start the Facebook bot
+ * @returns {Promise<void>}
+ */
+async function startBot() {
+  // Initialize appstate if needed
+  if (initializeAppState()) {
+    process.exit(0);
+  }
+
+  // Load appstate
+  const appState = loadAppState();
+  if (!appState) {
+    Logger.error("Failed to load appstate. Please check appstate.json");
+    process.exit(1);
+  }
+
+  Logger.info("Bot starting...");
+
+  // Wrap login in a Promise for async/await
+  return new Promise((resolve, reject) => {
+    login({ appState }, (err, api) => {
+      if (err) {
+        Logger.error("Login failed", err);
+        reject(err);
+        return;
       }
-    });
 
-    listener.on("presence", (data) => {
-      console.log(`👤 Presence update for ${data.userID}`);
-    });
+      // Apply listener options
+      api.setOptions(CONFIG.listenOptions);
 
-    listener.on("read_receipt", (data) => {
-      console.log(`👀 ${data.reader} read messages in ${data.threadID}`);
-    });
+      // Start MQTT listener
+      const listener = api.listenMqtt();
+      activeListener = listener;
 
-    // Thread events (admin text messages, name changes, etc.)
-    listener.on("event", (data) => {
-      console.log(`📢 Event: ${data.logMessageType}`);
-    });
+      // Set up all event handlers
+      setupEventListeners(listener, api);
 
-    // Friend requests
-    listener.on("friend_request_received", (data) => {
-      console.log(`👋 Friend request from ${data.actorFbId}`);
+      Logger.success("Bot initialized successfully!");
+      resolve({ api, listener });
     });
+  });
+}
 
-    listener.on("friend_request_cancel", (data) => {
-      console.log(`❌ Friend request canceled by ${data.actorFbId}`);
-    });
-  },
-);
+// Run the bot
+startBot().catch((error) => {
+  Logger.fatal("Failed to start bot", error);
+  process.exit(1);
+});
