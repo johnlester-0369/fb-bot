@@ -32,6 +32,8 @@ const CONFIG = {
   appStatePath: "appstate.json",
   /** Path to the commands directory */
   commandsPath: join(__dirname, "modules", "commands"),
+  /** Path to the events directory */
+  eventsPath: join(__dirname, "modules", "events"),
   /** MQTT listener options */
   listenOptions: {
     listenEvents: true,
@@ -219,6 +221,76 @@ async function loadCommands(commandsPath) {
 }
 
 // ============================================================================
+// EVENT LOADER
+// ============================================================================
+
+/**
+ * Dynamically load all event modules from the events directory
+ * @param {string} eventsPath - Path to the events directory
+ * @returns {Promise<Map<string, Object[]>>} Map of eventType to array of modules
+ */
+async function loadEvents(eventsPath) {
+  const events = new Map();
+
+  // Ensure events directory exists
+  if (!fs.existsSync(eventsPath)) {
+    Logger.warn(`Events directory not found: ${eventsPath}`);
+    fs.mkdirSync(eventsPath, { recursive: true });
+    Logger.info(`Created events directory: ${eventsPath}`);
+    return events;
+  }
+
+  try {
+    const files = await fs.promises.readdir(eventsPath);
+    const jsFiles = files.filter((file) => file.endsWith(".js"));
+
+    for (const file of jsFiles) {
+      try {
+        const filePath = join(eventsPath, file);
+        const fileUrl = pathToFileURL(filePath).href;
+        const module = await import(fileUrl);
+
+        // Validate module has required config
+        if (!module.config || !module.config.name) {
+          Logger.warn(`Skipping event ${file}: missing config.name`);
+          continue;
+        }
+
+        // Validate module has eventType array
+        if (!module.config.eventType || !Array.isArray(module.config.eventType)) {
+          Logger.warn(`Skipping event ${file}: missing or invalid config.eventType`);
+          continue;
+        }
+
+        // Validate module has onStart handler
+        if (typeof module.onStart !== "function") {
+          Logger.warn(`Skipping event ${file}: missing onStart handler`);
+          continue;
+        }
+
+        // Register module for each event type it handles
+        for (const eventType of module.config.eventType) {
+          if (!events.has(eventType)) {
+            events.set(eventType, []);
+          }
+          events.get(eventType).push(module);
+          Logger.info(`Loaded event: ${module.config.name} -> ${eventType}`);
+        }
+      } catch (loadError) {
+        Logger.error(`Failed to load event file: ${file}`, loadError);
+      }
+    }
+
+    const totalHandlers = Array.from(events.values()).reduce((sum, arr) => sum + arr.length, 0);
+    Logger.success(`Loaded ${totalHandlers} event handler(s) for ${events.size} event type(s)`);
+  } catch (error) {
+    Logger.error("Failed to read events directory", error);
+  }
+
+  return events;
+}
+
+// ============================================================================
 // MESSAGE HANDLER
 // ============================================================================
 
@@ -289,7 +361,52 @@ async function handleMessage(api, event, commands) {
 }
 
 // ============================================================================
-// EVENT HANDLERS
+// EVENT HANDLER
+// ============================================================================
+
+/**
+ * Handle incoming thread events (join, leave, etc.)
+ * Routes events to appropriate event modules based on logMessageType
+ * @param {Object} api - The Facebook API object
+ * @param {Object} event - The event object
+ * @param {Map<string, Object[]>} events - Map of eventType to array of modules
+ * @returns {Promise<void>}
+ */
+async function handleEvent(api, event, events) {
+  // Validate event has required properties
+  if (!event || !event.logMessageType) {
+    return;
+  }
+
+  const eventType = event.logMessageType;
+
+  // Find modules that handle this event type
+  const handlers = events.get(eventType);
+
+  if (!handlers || handlers.length === 0) {
+    // No handlers for this event type - that's okay, just log it
+    Logger.event("📢", `Unhandled event: ${eventType}`);
+    return;
+  }
+
+  // Build context object for handlers
+  const context = {
+    api,
+    event,
+  };
+
+  // Execute all handlers for this event type
+  for (const module of handlers) {
+    try {
+      await module.onStart(context);
+    } catch (error) {
+      Logger.error(`Event handler "${module.config.name}" failed for ${eventType}`, error);
+    }
+  }
+}
+
+// ============================================================================
+// EVENT LISTENERS SETUP
 // ============================================================================
 
 /**
@@ -297,8 +414,9 @@ async function handleMessage(api, event, commands) {
  * @param {Object} listener - The MQTT listener object
  * @param {Object} api - The Facebook API object
  * @param {Map<string, Object>} commands - Map of loaded commands
+ * @param {Map<string, Object[]>} events - Map of loaded event handlers
  */
-function setupEventListeners(listener, api, commands) {
+function setupEventListeners(listener, api, commands, events) {
   // Lifecycle events
   listener.on("connected", () => {
     Logger.success("MQTT Connected!");
@@ -358,9 +476,10 @@ function setupEventListeners(listener, api, commands) {
     Logger.event("👀", `${data.reader} read messages in ${data.threadID}`);
   });
 
-  // Thread events
-  listener.on("event", (data) => {
+  // Thread events - Route to event handlers
+  listener.on("event", async (data) => {
     Logger.event("📢", `Event: ${data.logMessageType}`);
+    await handleEvent(api, data, events);
   });
 
   // Friend requests
@@ -445,6 +564,9 @@ async function startBot() {
   // Load commands
   const commands = await loadCommands(CONFIG.commandsPath);
 
+  // Load events
+  const events = await loadEvents(CONFIG.eventsPath);
+
   // Wrap login in a Promise for async/await
   return new Promise((resolve, reject) => {
     login({ appState }, (err, api) => {
@@ -461,11 +583,11 @@ async function startBot() {
       const listener = api.listenMqtt();
       activeListener = listener;
 
-      // Set up all event handlers
-      setupEventListeners(listener, api, commands);
+      // Set up all event handlers (pass events map)
+      setupEventListeners(listener, api, commands, events);
 
       Logger.success("Bot initialized successfully!");
-      resolve({ api, listener, commands });
+      resolve({ api, listener, commands, events });
     });
   });
 }
