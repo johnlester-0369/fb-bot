@@ -1,77 +1,103 @@
 # FB-Bot 🤖
 
-A minimal and simple Facebook Messenger bot built with a modular, event-driven architecture. This lightweight bot provides essential features like text-to-speech, translation, QR code generation, and group event handling.
+> A modular, event-driven Facebook Messenger bot — reads session from `appstate.json`, authenticates through `fca-unofficial`, and dispatches incoming messages and group events to pluggable command and event modules.
 
-## ✨ Features
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org/) [![License](https://img.shields.io/badge/license-ISC-blue)]()
 
-- 📦 **Modular Command System** - Easy to add, remove, or modify commands
-- 🎯 **Event-Driven Architecture** - Handle group events like member joins/leaves
-- 🔊 **Text-to-Speech** - Convert text to audio in 100+ languages
-- 🌐 **Translation** - Translate text between languages using Google Translate
-- 📱 **QR Code Generator** - Create QR codes from text or URLs
-- 📊 **System Info** - View bot uptime, memory usage, and platform details
-- 👋 **Welcome/Goodbye Messages** - Automatic greetings for group members
+## Architecture
 
-## 📋 Prerequisites
+```
+         appstate.json
+               │
+               ▼
+  ┌─────────────────────────┐
+  │        index.js         │
+  │  (loader / dispatcher)  │
+  └────────────┬────────────┘
+               │
+               ▼
+  ┌─────────────────────────┐
+  │     fca-unofficial      │
+  │   (Facebook Chat API)   │
+  └────────────┬────────────┘
+               │ MQTT / HTTPS
+               ▼
+  ┌─────────────────────────┐
+  │   Facebook Messenger    │
+  │        Servers          │
+  └─────────────────────────┘
+```
 
-- [Node.js](https://nodejs.org/) (v18 or higher recommended)
+`index.js` loads session cookies from `appstate.json`, authenticates via `fca-unofficial`, and opens a persistent MQTT connection to Facebook's servers. Incoming messages are routed to command handlers (prefix-triggered via `onStart`) or chat handlers (every message via `onChat`). Group events are routed to event handlers by `logMessageType`.
+
+## Features
+
+- **Modular Command System** — add, remove, or modify commands without touching core logic
+- **Event-Driven Architecture** — handle group events such as member joins and leaves
+- **Text-to-Speech** — convert text to audio in 100+ languages
+- **Translation** — translate text between languages using Google Translate
+- **QR Code Generator** — generate QR codes from any text or URL
+- **System Info** — view bot uptime, memory usage, and platform details
+- **Welcome / Goodbye Messages** — automatic greetings for group members
+
+## Prerequisites
+
+- [Node.js](https://nodejs.org/) v18 or higher
 - A Facebook account
-- Facebook session cookies (AppState)
+- Facebook session cookies exported as `appstate.json`
 
-## 🚀 Installation
+## Installation
 
-1. **Clone or download the repository**
+**1. Clone the repository**
 
-   ```bash
-   git clone <repository-url>
-   cd fb-bot
-   ```
+```bash
+git clone <repository-url>
+cd fb-bot
+```
 
-2. **Install dependencies**
+**2. Install dependencies**
 
-   ```bash
-   npm install
-   ```
+```bash
+npm install
+```
 
-3. **Configure AppState**
+**3. Configure AppState**
 
-   Create an `appstate.json` file in the root directory with your Facebook session cookies.
+Create `appstate.json` in the root directory with your Facebook session cookies. Tools like [c3c-ufc-utility](https://github.com/c3cbot/c3c-ufc-utility) or browser cookie-export extensions can generate this file.
 
-   You can obtain your AppState using tools like [c3c-ufc-utility](https://github.com/c3cbot/c3c-ufc-utility) or browser extensions that export Facebook cookies.
+```json
+[
+  {
+    "key": "cookie_name",
+    "value": "cookie_value",
+    "domain": "facebook.com",
+    "path": "/",
+    "hostOnly": false,
+    "creation": "2024-01-01T00:00:00.000Z",
+    "lastAccessed": "2024-01-01T00:00:00.000Z"
+  }
+]
+```
 
-   ```json
-   [
-     {
-       "key": "cookie_name",
-       "value": "cookie_value",
-       "domain": "facebook.com",
-       "path": "/",
-       "hostOnly": false,
-       "creation": "2024-01-01T00:00:00.000Z",
-       "lastAccessed": "2024-01-01T00:00:00.000Z"
-     }
-   ]
-   ```
+**4. Start the bot**
 
-4. **Start the bot**
+```bash
+npm start
+```
 
-   ```bash
-   npm start
-   ```
-
-## 📖 Available Commands
+## Commands
 
 | Command | Description | Usage |
 |---------|-------------|-------|
-| `/help` | Shows all available commands | `/help` |
-| `/hi` | Greets the user | `/hi` |
-| `/ping` | Check if bot is alive with latency | `/ping` |
-| `/system` | View bot system information | `/system` |
-| `/qr` | Generate QR code from text | `/qr <text>` or reply with `/qr` |
+| `/help` | List all available commands | `/help` |
+| `/hi` | Greet the user | `/hi` |
+| `/ping` | Check bot latency | `/ping` |
+| `/system` | View uptime, memory, and platform info | `/system` |
+| `/qr` | Generate a QR code | `/qr <text>` or reply with `/qr` |
 | `/say` | Convert text to speech | `/say <text> \| <lang>` |
 | `/trans` | Translate text | `/trans <text> \| <lang>` |
 
-### Command Examples
+### Examples
 
 ```
 /qr https://example.com
@@ -84,125 +110,86 @@ A minimal and simple Facebook Messenger bot built with a modular, event-driven a
 /trans Hello | ja
 ```
 
-### Supported Languages (TTS & Translation)
+### Language Codes
 
-Common language codes: `en` (English), `ko` (Korean), `ja` (Japanese), `zh` (Chinese), `vi` (Vietnamese), `th` (Thai), `fr` (French), `de` (German), `es` (Spanish), `fil` (Filipino), `id` (Indonesian)
+`en` (English) · `ko` (Korean) · `ja` (Japanese) · `zh` (Chinese) · `vi` (Vietnamese) · `th` (Thai) · `fr` (French) · `de` (German) · `es` (Spanish) · `fil` (Filipino) · `id` (Indonesian)
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 fb-bot/
-├── index.js                 # Main entry point
+├── index.js                 # Main entry point — loader, dispatcher, lifecycle
 ├── package.json             # Dependencies and scripts
 ├── appstate.json            # Facebook session (DO NOT SHARE)
 ├── modules/
-│   ├── commands/            # Command modules
-│   │   ├── help.js          # Help command
-│   │   ├── hi.js            # Greeting command
-│   │   ├── logger.js        # Message logger (onChat)
-│   │   ├── ping.js          # Ping/pong command
-│   │   ├── qr.js            # QR code generator
-│   │   ├── say.js           # Text-to-speech
-│   │   ├── system.js        # System information
-│   │   └── trans.js         # Translation
-│   └── events/              # Event handlers
-│       ├── welcome.js       # Welcome new members
-│       └── goodbye.js       # Goodbye leaving members
+│   ├── commands/            # Command modules (prefix-triggered)
+│   └── events/              # Event handler modules (group events)
 └── lib/
     └── fca-unofficial/      # Facebook Chat API library
 ```
 
-## 🔧 Creating New Commands
+## Creating Commands
 
-Create a new file in `modules/commands/` with the following structure:
+Add a `.js` file to `modules/commands/`. Export `config` and at least one of `onStart` (runs when the command prefix is matched) or `onChat` (runs on every message).
 
 ```javascript
-/**
- * Example Command Module
- * @module commands/example
- */
-
-/**
- * Command configuration
- * @type {Object}
- */
 export const config = {
   name: "example",
   description: "Description of the command",
 };
 
-/**
- * Handles the /example command (requires prefix)
- * @param {Object} context - The command context
- */
+// Runs when a user sends /example
 export const onStart = async ({ api, event, args, prefix }) => {
   const { threadID, messageID } = event;
-  
-  // Your command logic here
   api.sendMessage("Hello from example command!", threadID, messageID);
 };
 
-/**
- * Optional: Handles ALL messages (no prefix required)
- * Useful for logging, auto-replies, keyword detection
- */
+// Optional: runs on every message without a prefix
 export const onChat = async ({ api, event }) => {
-  // This runs for every message
   console.log(`Message received: ${event.body}`);
 };
 ```
 
-### Command Context Properties
+### Command Context
 
-| Property | Description |
-|----------|-------------|
-| `api` | Facebook API object for sending messages |
-| `event` | Message event with `threadID`, `senderID`, `body`, `args`, etc. |
-| `args` | Array of command arguments (without prefix and command name) |
-| `prefix` | The command prefix (default: `/`) |
-| `commands` | Map of all loaded commands |
+| Property | Type | Description |
+|----------|------|-------------|
+| `api` | Object | Facebook API — send messages, reactions, etc. |
+| `event` | Object | Message event with `threadID`, `senderID`, `body`, `args` |
+| `args` | string[] | Arguments after the command name |
+| `prefix` | string | Configured command prefix (default `/`) |
+| `commands` | Map | All loaded command modules |
 
-## 🎉 Creating New Event Handlers
+## Creating Event Handlers
 
-Create a new file in `modules/events/` to handle group events:
+Add a `.js` file to `modules/events/`. Export `config` (with an `eventType` array) and `onStart`.
 
 ```javascript
-/**
- * Example Event Module
- * @module events/example
- */
-
 export const config = {
   name: "example",
   description: "Handles specific events",
-  eventType: ["log:subscribe", "log:unsubscribe"], // Event types to handle
+  eventType: ["log:subscribe", "log:unsubscribe"],
 };
 
-/**
- * Handles the event
- * @param {Object} context - The event context
- */
 export const onStart = async ({ api, event }) => {
   const { threadID, logMessageType, logMessageData } = event;
-  
-  // Your event handling logic here
   api.sendMessage("An event occurred!", threadID);
 };
 ```
 
-### Available Event Types
+### Event Types
 
-| Event Type | Description |
-|------------|-------------|
+| Event Type | Trigger |
+|------------|---------|
 | `log:subscribe` | Member added to group |
-| `log:unsubscribe` | Member left/removed from group |
+| `log:unsubscribe` | Member left or was removed |
 | `log:thread-name` | Group name changed |
 | `log:thread-icon` | Group icon changed |
 | `log:thread-color` | Chat color changed |
 
-## ⚙️ Configuration
+## Configuration
 
-Edit the `CONFIG` object in `index.js` to customize:
+Edit the `CONFIG` object in `index.js`:
 
 ```javascript
 const CONFIG = {
@@ -218,43 +205,25 @@ const CONFIG = {
 };
 ```
 
-## 🔒 Security Notes
+## Security
 
-> ⚠️ **Important Security Warnings**
+> ⚠️ **Important**
 
-1. **Never share your `appstate.json`** - It contains your Facebook session and can be used to access your account
+- **Never share `appstate.json`** — it contains your Facebook session and grants full account access
+- **Add `appstate.json` to `.gitignore`** before committing
+- Use environment variables for sensitive configuration in production
+- Regularly refresh your AppState — sessions expire; the bot handles this gracefully
 
-2. **Add to `.gitignore`** - Ensure `appstate.json` is in your `.gitignore` file:
-   ```
-   appstate.json
-   ```
+## Troubleshooting
 
-3. **Use environment variables** for sensitive data in production
+**Bot not starting** — verify `appstate.json` exists and contains valid session data; confirm your account is not locked or checkpointed; run `npm install` to ensure all dependencies are present.
 
-4. **Regularly update AppState** - Sessions can expire; the bot handles this gracefully
+**Bot not receiving messages** — confirm `listenEvents: true` in options; check the console for connection errors; your session may have expired and need refreshing.
 
-## 🐛 Troubleshooting
+**Commands not working** — ensure commands use the correct prefix (default `/`); confirm command files export both `config` and `onStart`; review the console for module load errors.
 
-### Bot not starting
-- Verify `appstate.json` exists and contains valid session data
-- Check if your Facebook account is not locked/checkpointed
-- Run `npm install` to ensure all dependencies are installed
+**Rate limiting** — Facebook may temporarily restrict accounts that send too many messages; add delays between messages if sending in bulk; avoid automated mass messaging.
 
-### Bot not receiving messages
-- Confirm `listenEvents: true` in options
-- Check console for connection errors
-- Your session may have expired; get a new AppState
+## License
 
-### Commands not working
-- Ensure commands use the correct prefix (default: `/`)
-- Check that command files export `config` and `onStart`
-- Look for errors in the console
-
-### Rate limiting issues
-- Facebook may temporarily restrict accounts sending too many messages
-- Add delays between messages if sending in bulk
-- Avoid spamming or automated mass messaging
-
-## 📄 License
-
-This project is for educational purposes. Use responsibly and in accordance with Facebook's Terms of Service.
+For educational purposes. Use responsibly and in accordance with Facebook's Terms of Service.
